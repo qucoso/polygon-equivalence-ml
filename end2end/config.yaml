@@ -1,0 +1,86 @@
+num_epochs: 80
+tqdm_loader: True
+accumulation_steps: 1
+save_path: "model"
+calculate_threshold: True
+calculate_accuracy: False
+
+hyperparameter:
+  # lr: 0.0002
+  # weight_decay: 0.00003
+  lr: 0.00001
+  weight_decay: 0.00003
+
+miner:
+  miner_type: "triplet"             # "multi" oder "triplet"
+  triplet_margin: 0.5            # Margin für den Triplet-Miner
+  type_of_triplets: "semihard"  # "hard", "semihard" oder "all"
+
+scheduler:
+  type: "onecycle" #"onecycle" "plateau" "cosine"
+  warm_up: 0.1
+
+dataset:
+  parquet_path: "../data/polygons.parquet"
+  hard_candidates_path: "../data/hard_negative_candidates.json"
+  intersection_path: "../data/intersections_pairs.csv" 
+  negative_strategies:
+    modify: 0.6
+    same_center_different_shape: 0.1
+    random_other: 0.1
+    cluster: 0.15
+    intersecting: 0.05
+  polygon_augmentation:
+    scale_ranges:
+      - [0.6, 0.8]
+      - [1.2, 1.5]
+    rotation_range: [15.0, 345.0]
+    translate_range: [0.3, 3.0]
+    bias_power: 1.0
+  positive_ratio: 0.5
+  train_split: 0.9
+  val_split: 0.1
+  num_workers: 14
+  batch_size: 1024
+  prefetch_factor: 2
+  drop_last: True
+  cache_in_memory: True
+
+early_stopping:
+  patience: 15
+
+graph_encoder:
+  graph_encoder_type: "mp"  # "gat" oder "mp" oder "gine"
+  hidden_dim: 64
+  embedding_dim: 128
+  num_layers: 9
+  num_heads: 4
+  dropout: 0.017
+  pooling_strategy: "attention"
+  loc_encoding_dim: 8
+  loc_encoding_min_freq: 1000.0
+  loc_encoding_max_freq: 5600.0
+  loc_encoding_type: "multiscale_learnable"
+  use_edge_attr: True
+
+perceiver_encoder:
+  d_model: 64
+  d_latents: 64
+  num_latents: 12              # mehr Latents = besseres formales Gedächtnis
+  num_heads: 4                # gute Auflösung bei d_latents = 128 → 16 pro Kopf
+
+  num_cross_layers: 1         # robusteres Mapping von Input → Latents
+  num_self_layers: 4          # tiefere Modellierung der Formstruktur
+
+  loc_encoding_dim: 8
+  loc_encoding_min_freq: 1000.0
+  loc_encoding_max_freq: 5600.0
+  loc_encoding_type: "multiscale_learnable"
+  d_pos_enc: 16
+  embedding_dim: 128
+
+  dim_feedforward_factor: 4   # Skaliert die Feedforward-Netze (in Transformer)
+  num_pool_queries: 16         # mehrere Perspektiven auf die Form
+                              # → z.B. Rand, Mitte, Ecken, Fläche
+  latent_dropout: 0.1         # Regularisierung gegen unscharfe Generalisierungen
+  use_layernorm_inputs: True # Stabilisiert Input-Projektion vor Attention

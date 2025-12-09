@@ -1,0 +1,34 @@
+num_epochs: 70
+tqdm_loader: True
+save_path: "model"
+tqdm_loader: True
+use_amp: True
+
+hyperparameter:
+  lr: 0.0003
+  weight_decay: 0.00001
+
+scheduler:
+  type: "onecycle"
+  warm_up: 0.1
+
+dataset:
+  X_path: '../../data/berlin_X_pairs_dataset_2_KOKO.npy'
+  y_path: '../../data/berlin_y_pairs_dataset_2_KOKO.npy'
+  batch_size: 1024
+  num_workers: 14
+  prefetch_factor: 2
+  val_split: 0.1
+
+early_stopping:
+  patience: 10
+
+model: 
+  shape_feat_dim: 14
+  hidden_layers: [128, 256, 96, 128]
+  num_frequencies: 4
+  dropout_rate: 0.1
+  activation_name: "LeakyReLU"
+  sinusoidal_mode: "multiscale_learnable"
+  min_freq: 1000.0
+  max_freq: 5600.0
