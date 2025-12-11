@@ -9,8 +9,8 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from typing import Dict, Tuple, Optional, Any
 from helper.polygonaugmenter import PolygonAugmenter
-from helper.helper_architecture import PolygonGraphBuilder
 from torch_geometric.data import Data, Batch
+from torch_geometric.utils import to_undirected
 
 class PairPolygonDataset(Dataset):
     def __init__(
@@ -22,9 +22,11 @@ class PairPolygonDataset(Dataset):
             positive_ratio: float = 0.5,
             model_mode: str = "graph",
             augmenter=None,
+            k_eigvecs: int = 10  # Anzahl der Eigenvektoren für Graph Transformer
     ):
         self.parquet_path = parquet_path
         self.model_mode = model_mode
+        self.k_eigvecs = k_eigvecs
 
         df = pd.read_csv(intersection_path)
         self.intersection_pairs = df.values.astype(str).tolist()
@@ -40,9 +42,7 @@ class PairPolygonDataset(Dataset):
         self.polygon_variations = df.groupby('polygon_id')['variation'].apply(list).to_dict()
 
         self.augmenter = augmenter if augmenter else PolygonAugmenter()
-
         self.positive_ratio = positive_ratio
-
         self.negative_strategies = {k: float(v) for k, v in negative_strategies.items()}
 
         if not math.isclose(sum(self.negative_strategies.values()), 1.0):
@@ -67,33 +67,63 @@ class PairPolygonDataset(Dataset):
 
         return self.lookup_table[(poly_id, variation)].clone()
 
-    def __getitem__(self, index: int) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[int, int]]:
+    def _compute_ring_pe(self, num_nodes: int, k: int) -> torch.Tensor:
+        """
+        Berechnet analytisch die Laplacian Eigenvektoren für einen Ring-Graphen.
+        Sehr schnell (O(N)), keine teure Eigendecomposition nötig.
+        """
+        if num_nodes < 3:
+            return torch.zeros((num_nodes, k))
+
+        # Indizes n und Frequenzen
+        n = torch.arange(num_nodes, dtype=torch.float32).unsqueeze(1)
+        # Wir brauchen k Features, also k/2 Frequenzen (da sin+cos Paare)
+        num_freqs = (k + 1) // 2
+        freqs = torch.arange(1, num_freqs + 1, dtype=torch.float32).unsqueeze(0)
+
+        # Argument: 2 * pi * k * n / N
+        arg = 2 * np.pi * freqs * n / num_nodes
+
+        # Sinus und Cosinus Komponenten
+        pe = torch.cat([torch.cos(arg), torch.sin(arg)], dim=1)
+
+        # Auf exakt k Dimensionen zuschneiden (falls k ungerade war)
+        return pe[:, :k]
+
+    def _build_graph_data(self, coordinates: torch.Tensor) -> Data:
+        """Erstellt PyG Data mit Ring-Topologie und LapPE."""
+        num_nodes = coordinates.size(0)
+
+        # 1. Kanten erstellen (Ring: 0-1, 1-2, ..., N-0)
+        source = torch.arange(num_nodes, dtype=torch.long)
+        target = torch.roll(source, -1)
+        edge_index = torch.stack([source, target], dim=0)
+        # Ungerichtet machen
+        edge_index = to_undirected(edge_index, num_nodes=num_nodes)
+
+        # 2. Analytische Positional Encodings
+        eigvecs = self._compute_ring_pe(num_nodes, self.k_eigvecs)
+
+        return Data(x=coordinates, pos=coordinates, edge_index=edge_index, eigvecs=eigvecs)
+
+    def __getitem__(self, index: int):
         anchor_idx = index % len(self.polygon_ids)
         anchor_id = self.polygon_ids[anchor_idx]
         other_id = anchor_id
 
         if np.random.random() < self.positive_ratio:
             variations = self.polygon_variations[anchor_id]
-            # in 16 % der Fälle einfach Original
             if len(variations) >= 2 and np.random.random() > 0.16:
-                # wenn ich hier replace True -> dann können auch gleiche Paare
-                # gewichtete Paare wie in den Anfangsdtensatz
-
                 v1, v2 = np.random.choice(variations, 2, replace=False)
             else:
                 v1 = v2 = variations[0]
 
             poly1 = self._load_polygon(anchor_id, v1)
             poly2 = self._load_polygon(anchor_id, v2)
-
             strategy = f"{v1}-{v2}"
-
         else:
             poly1 = self._load_polygon(anchor_id)
-            strategy = np.random.choice(
-                list(self.negative_strategies.keys()),
-                p=list(self.negative_strategies.values())
-            )
+            strategy = np.random.choice(list(self.negative_strategies.keys()), p=list(self.negative_strategies.values()))
 
             if strategy == 'modify':
                 poly2 = poly1.clone()
@@ -134,59 +164,44 @@ class PairPolygonDataset(Dataset):
         poly2 = self._random_roll(poly2)
 
         if self.model_mode == "graph":
-            poly1 = Data(pos=poly1)
-            poly2 = Data(pos=poly2)
+            # Hier bauen wir den Graphen inklusive PE
+            poly1 = self._build_graph_data(poly1)
+            poly2 = self._build_graph_data(poly2)
 
+            
         return poly1, poly2, int(anchor_id), int(other_id), strategy
 
 def collate_graph_pairs(batch: list) -> dict:
     graphs1, graphs2, ids1, ids2, strategy = zip(*batch)
-
-    batch1 = Batch.from_data_list(graphs1)
-    batch2 = Batch.from_data_list(graphs2)
-
     return {
-        "poly1": batch1,
-        "poly2": batch2,
+        "poly1": Batch.from_data_list(graphs1),
+        "poly2": Batch.from_data_list(graphs2),
         "poly1_i": torch.tensor(ids1, dtype=torch.long),
         "poly2_i": torch.tensor(ids2, dtype=torch.long),
         "strategy": strategy
     }
 
+
 def collate_pair_sequence(batch):
     poly1, poly2, poly1_i, poly2_i, strategy = zip(*batch)
-
-    # Lengths für Masken berechnen
     poly1_lengths = torch.tensor([poly.size(0) for poly in poly1], dtype=torch.long)
     poly2_lengths = torch.tensor([poly.size(0) for poly in poly2], dtype=torch.long)
-
-    # Padding anwenden
+    
     poly1_padded = pad_sequence(poly1, batch_first=True, padding_value=0.0)
     poly2_padded = pad_sequence(poly2, batch_first=True, padding_value=0.0)
-
-    # Labels zu Tensor
-    poly1_i_tensor = torch.tensor(poly1_i, dtype=torch.long)
-    poly2_i_tensor = torch.tensor(poly2_i, dtype=torch.long)
-
-    # Masken erstellen (True für Padding-Positionen)
+    
     max_len1 = poly1_padded.size(1)
     max_len2 = poly2_padded.size(1)
-
-    idx_range1 = torch.arange(max_len1).unsqueeze(0)
-    idx_range2 = torch.arange(max_len2).unsqueeze(0)
-
-    poly1_mask = (idx_range1 >= poly1_lengths.unsqueeze(1))
-    poly2_mask = (idx_range2 >= poly2_lengths.unsqueeze(1))
+    
+    poly1_mask = (torch.arange(max_len1).unsqueeze(0) >= poly1_lengths.unsqueeze(1))
+    poly2_mask = (torch.arange(max_len2).unsqueeze(0) >= poly2_lengths.unsqueeze(1))
 
     return {
-        "poly1": poly1_padded,
-        "poly2": poly2_padded,
-        "poly1_mask": poly1_mask,
-        "poly2_mask": poly2_mask,
-        "poly1_i": poly1_i_tensor,
-        "poly2_i": poly2_i_tensor,
-        "poly1_lengths": poly1_lengths,
-        "poly2_lengths": poly2_lengths,
+        "poly1": poly1_padded, "poly2": poly2_padded,
+        "poly1_mask": poly1_mask, "poly2_mask": poly2_mask,
+        "poly1_i": torch.tensor(poly1_i, dtype=torch.long),
+        "poly2_i": torch.tensor(poly2_i, dtype=torch.long),
+        "poly1_lengths": poly1_lengths, "poly2_lengths": poly2_lengths,
         "strategy": strategy
     }
 
@@ -195,8 +210,7 @@ def split_dataset(dataset, train_ratio, val_ratio, seed=42):
     train_len = int(train_ratio * total_len)
     val_len = int(val_ratio * total_len)
     test_len = total_len - train_len - val_len
-
-    random.seed(seed)  # Für Reproduzierbarkeit
+    random.seed(seed)
     return random_split(dataset, [train_len, val_len, test_len], generator=torch.Generator().manual_seed(seed))[:2]
 
 def get_dataloader(config, model_mode="graph"):
@@ -209,7 +223,8 @@ def get_dataloader(config, model_mode="graph"):
         negative_strategies=config["dataset"]["negative_strategies"],
         positive_ratio=config["dataset"].get("positive_ratio", 0.5),
         model_mode=model_mode,
-        augmenter=augmenter
+        augmenter=augmenter,
+        k_eigvecs=config["dataset"].get("k_eigvecs", 10)
     )
 
     collate_fn = collate_graph_pairs if model_mode == "graph" else collate_pair_sequence
@@ -240,24 +255,38 @@ def get_dataloader(config, model_mode="graph"):
 
 #=======================
 class EvaluationPolygonDataset(Dataset):
-    def __init__(self, parquet_path: str, model_mode: str = "graph" ):
+    def __init__(self, parquet_path: str, model_mode: str = "graph", k_eigvecs: int = 5):
         self.table = pq.read_table(parquet_path)
         self.model_mode = model_mode
+        self.k_eigvecs = k_eigvecs
 
 
     def __len__(self) -> int:
         return len(self.table)
 
+    def _compute_ring_pe(self, num_nodes: int, k: int) -> torch.Tensor:
+        if num_nodes < 3: return torch.zeros((num_nodes, k))
+        n = torch.arange(num_nodes, dtype=torch.float32).unsqueeze(1)
+        freqs = torch.arange(1, ((k + 1) // 2) + 1, dtype=torch.float32).unsqueeze(0)
+        arg = 2 * np.pi * freqs * n / num_nodes
+        pe = torch.cat([torch.cos(arg), torch.sin(arg)], dim=1)
+        return pe[:, :k]
+
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, str]:
         row = self.table.slice(index, 1)
-
-        # Lade Polygon-Daten
         polygon_id = int(row['polygon_id'].to_pylist()[0])
         coordinates = row['coordinates'].to_pylist()[0]
         polygon = torch.tensor(coordinates, dtype=torch.float)
 
         if self.model_mode == "graph":
-            polygon = Data(pos=polygon)
+            # Auch hier: Graph + PE bauen
+            num_nodes = polygon.size(0)
+            source = torch.arange(num_nodes, dtype=torch.long)
+            target = torch.roll(source, -1)
+            edge_index = to_undirected(torch.stack([source, target], dim=0), num_nodes=num_nodes)
+            eigvecs = self._compute_ring_pe(num_nodes, self.k_eigvecs)
+            
+            polygon = Data(x=polygon, pos=polygon, edge_index=edge_index, eigvecs=eigvecs)
 
         return polygon, polygon_id
 
@@ -285,13 +314,11 @@ def eval_collate_fn_graph(batch):
     }
 
 def get_evaluation_dataloader(config, model_mode="graph"):
-    dataset = EvaluationPolygonDataset(
-        parquet_path=config["dataset"]["parquet_path"],
-    )
-
+    k_eigvecs = config["dataset"].get("k_eigvecs", 10)
+    dataset = EvaluationPolygonDataset(parquet_path=config["dataset"]["parquet_path"], model_mode=model_mode, k_eigvecs=k_eigvecs)
     eval_collate_fn = eval_collate_fn_graph if model_mode == "graph" else eval_collate_fn_seq
 
-    dataloader = DataLoader(
+    return DataLoader(
         dataset,
         batch_size=config['dataset'].get("batch_size", 1024),
         shuffle=False,
@@ -302,5 +329,3 @@ def get_evaluation_dataloader(config, model_mode="graph"):
         persistent_workers=config["dataset"].get("num_workers") > 0,
         prefetch_factor=config["dataset"].get("prefetch_factor", 2)
     )
-
-    return dataloader

@@ -21,9 +21,9 @@ scheduler:
   warm_up: 0.1
 
 dataset:
-  parquet_path: "../data/polygons.parquet"
-  hard_candidates_path: "../data/hard_negative_candidates.json"
-  intersection_path: "../data/intersections_pairs.csv" 
+  parquet_path: "../../data/polygons.parquet"
+  hard_candidates_path: "../../data/hard_negative_candidates.json"
+  intersection_path: "../../data/intersections_pairs.csv" 
   negative_strategies:
     modify: 0.6
     same_center_different_shape: 0.1
@@ -42,6 +42,7 @@ dataset:
   val_split: 0.1
   num_workers: 14
   batch_size: 1024
+  lap_pe_k: 5
   prefetch_factor: 2
   drop_last: True
   cache_in_memory: True
@@ -50,13 +51,13 @@ early_stopping:
   patience: 15
 
 graph_encoder:
-  graph_encoder_type: "mp"  # "gat" oder "mp" oder "gine"
+  graph_encoder_type: "GraphTransformer"  # "gat" oder "mp" oder "gine" oder "GraphTransformer"
   hidden_dim: 64
   embedding_dim: 128
   num_layers: 9
   num_heads: 4
   dropout: 0.017
-  pooling_strategy: "attention"
+  pooling_strategy: "max" # "attention" or "mean" or "max"
   loc_encoding_dim: 8
   loc_encoding_min_freq: 1000.0
   loc_encoding_max_freq: 5600.0

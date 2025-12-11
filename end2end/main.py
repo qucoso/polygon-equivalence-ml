@@ -15,8 +15,8 @@ from datetime import datetime
 from helper.trainer import EmbeddingTrainer
 from helper.dataset import get_dataloader, get_evaluation_dataloader
 
-from helper.architectures.gat import GraphPolygonEncoder
-from helper.architectures.perceiver_io_encoder import PolygonPerceiver
+from helper.architectures.graph import GraphPolygonEncoder
+from helper.architectures.perceiver import PolygonPerceiver
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -89,6 +89,7 @@ def load_encoder_from_mlflow(run_id: str, model_path: str, logger: logging.Logge
                 "loc_encoding_max_freq": float(params.get(f'{prefix}loc_encoding_max_freq', 5600.0)),
                 "graph_encoder_type": params.get(f'{prefix}graph_encoder_type', 'gat'),
                 "use_edge_attr": str(params.get(f'{prefix}use_edge_attr', 'False')).lower() == 'true',
+                "lap_pe_k": int(params.get(f'{prefix}lap_pe_k', 10)),
             }
             encoder = GraphPolygonEncoder(**encoder_kwargs)
 
