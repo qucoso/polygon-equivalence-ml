@@ -285,7 +285,7 @@ class GraphPolygonEncoder(nn.Module):
                  loc_encoding_dim: int = 64,
                  loc_encoding_min_freq: float = 1.0,
                  loc_encoding_max_freq: float = 5600.0,
-                 loc_encoding_type: str = "multiscale_dotproduct",
+                 loc_encoding_type: str = "multiscale_learnable",
                  graph_encoder_type: str = "gat",
                  use_edge_attr: bool = True,
                  lap_pe_k: int = 10,
@@ -343,7 +343,7 @@ class GraphPolygonEncoder(nn.Module):
                 num_layers=num_layers,
                 dropout=dropout,
                 pooling_strategy=pooling_strategy,
-                use_laplacian_pe=True, # Aktivieren
+                use_laplacian_pe=True,
                 lap_pe_k=lap_pe_k,
                 norm_type=norm_type
             )
@@ -362,28 +362,27 @@ class GraphPolygonEncoder(nn.Module):
 
 class GraphTransformerBlock(nn.Module):
     """
-    Ein einzelner Graph Transformer Block.
-    Struktur: Norm -> Attention (w/ Edge Features) -> Residual -> Norm -> Feed Forward -> Residual
+    A single graph transformer block.
+    Structure: Norm -> Attention (with edge features) -> Residual -> Norm -> Feed Forward -> Residual
     """
     def __init__(self, in_dim, out_dim, heads, dropout, edge_dim, norm_type='layer'):
         super().__init__()
         
-        # 1. Attention Layer (Basiert auf UniMP [4] / Dwivedi [1])
-        # Dieser Layer berechnet die Attention scores auch basierend auf Kanten-Attributen.
-        # Wichtig: out_channels pro Head ist out_dim // heads.
+        # 1. Attention Layer
+        # This layer also calculates attention scores based on edge attributes.
+        # Important: out_channels per head is out_dim // heads.
         self.attn = TransformerConv(
             in_channels=in_dim,
             out_channels=out_dim // heads, 
             heads=heads,
             dropout=dropout,
             edge_dim=edge_dim,
-            beta=True, # Lernt einen Gating-Mechanismus (Bias) im Attention-Schritt [4]
-            concat=True # Konkateniert die Heads (Standard für Transformer)
+            beta=True, # Learns a gating mechanism (bias) in the attention step
+            concat=True # Concatenates the heads (default for Transformer)
         )
         
         # 2. Normalization
-        # Dwivedi et al. [1] schlagen oft BatchNorm für Graphen vor, 
-        # Standard-Transformer nutzen LayerNorm. Hier konfigurierbar.
+        # Standard transformers use LayerNorm.
         if norm_type == 'batch':
             self.norm1 = nn.BatchNorm1d(out_dim)
             self.norm2 = nn.BatchNorm1d(out_dim)
@@ -392,7 +391,7 @@ class GraphTransformerBlock(nn.Module):
             self.norm2 = nn.LayerNorm(out_dim)
         
         # 3. Feed Forward Network (FFN)
-        # Standard MLP Block wie in jedem Transformer [1]
+        # Standard MLP block as in any transformer
         self.ffn = nn.Sequential(
             nn.Linear(out_dim, out_dim * 2),
             nn.GELU(),
@@ -406,10 +405,10 @@ class GraphTransformerBlock(nn.Module):
         # --- Attention Sub-Layer ---
         x_in = x
         
-        # Pre-Normalization (oft stabileres Training bei tiefen Netzen)
+        # Pre-normalization (often more stable training for deep networks)
         x = self.norm1(x)
         
-        # Attention Berechnung mit Kanten-Features
+        # Attention calculation with edge features
         x = self.attn(x, edge_index, edge_attr=edge_attr)
         
         # Residual Connection
@@ -435,22 +434,21 @@ class PolygonGraphTransformerEncoder(nn.Module):
                  num_heads=4,
                  num_layers=3,
                  dropout=0.1,
-                 pooling_strategy='attention',
-                 use_laplacian_pe=False, # Stellschraube: Positional Encoding
-                 lap_pe_k=10,  # Stellschraube: Anzahl der LapPE-Dimensionen
-                 norm_type='layer'):     # Stellschraube: Normalisierungstyp
+                 pooling_strategy='max',
+                 use_laplacian_pe=False, # Adjustment parameter: Positional Encoding
+                 lap_pe_k=10,  # Adjustment parameter: Number of LapPE dimensions
+                 norm_type='layer'):     # Adjustment parameter: Normalization type
         super().__init__()
 
-        # Input Projektion
+        # Input Projection
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         
         # Optional: Laplacian Positional Encoding (LapPE)
-        # Nach Dwivedi et al. [1] essentiell für Graph Transformer, um Struktur zu lernen.
         self.use_laplacian_pe = use_laplacian_pe
         if use_laplacian_pe:
             self.pe_proj = nn.Linear(lap_pe_k, hidden_dim) 
 
-        # Stack von Transformer Blöcken
+        # Stack of transformer blocks
         self.layers = nn.ModuleList()
         for _ in range(num_layers):
             self.layers.append(
@@ -464,7 +462,7 @@ class PolygonGraphTransformerEncoder(nn.Module):
                 )
             )
 
-        # Output Projektion
+        # Output projection
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, embedding_dim),
             nn.ReLU(),
@@ -472,7 +470,7 @@ class PolygonGraphTransformerEncoder(nn.Module):
             nn.Linear(embedding_dim, embedding_dim)
         )
 
-        # Pooling Strategie
+        # Pooling strategy
         self.pooling_strategy = pooling_strategy
         if pooling_strategy == 'attention':
             self.attention_pool = nn.Sequential(
@@ -483,27 +481,27 @@ class PolygonGraphTransformerEncoder(nn.Module):
     def forward(self, data):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         
-        # 1. Feature Projektion
+        # 1. Feature Projection
         x = self.input_proj(x)
 
-        # 2. Additive Positional Encoding (falls aktiviert)
-        # Graph Transformer brauchen Positions-Infos, da Attention per se "positionsblind" ist [1].
+        # 2. Additive Positional Encoding (if enabled)
+        # Graph transformers require positional information because attention is inherently "position-blind".
         if self.use_laplacian_pe and hasattr(data, 'eigvecs'):
-             # Random Sign Flip Trick aus [1] für Robustheit
+            # Random sign flip trick from [1] for robustness
             eigvecs = data.eigvecs
             if self.training:
                 sign_flip = torch.rand(eigvecs.size(1), device=x.device) < 0.5
                 sign_flip = sign_flip.float() * 2 - 1
                 eigvecs = eigvecs * sign_flip.unsqueeze(0)
             
-            # Addiere projizierte Eigenvektoren zum Node-Feature
+            # Add projected eigenvectors to node feature
             x = x + self.pe_proj(eigvecs)
 
-        # 3. Durchlaufen der Transformer Blöcke
+        # 3. Passing through the transformer blocks
         for layer in self.layers:
             x = layer(x, edge_index, edge_attr)
 
-        # 4. Pooling (Graph Embedding erstellen)
+        # 4. Pooling (creating graph embedding)
         if self.pooling_strategy == 'attention':
             att_weights = self.attention_pool(x)
             pooled = global_add_pool(x * att_weights, batch)
@@ -514,7 +512,7 @@ class PolygonGraphTransformerEncoder(nn.Module):
         else:
             pooled = global_mean_pool(x, batch)
 
-        # 5. Finales Embedding
+        # 5. Final Embedding
         embedding = self.output_proj(pooled)
         embedding = F.normalize(embedding, dim=-1)
         return embedding

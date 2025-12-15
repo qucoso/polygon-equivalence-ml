@@ -21,7 +21,7 @@ class LearnableFourierFeatures(nn.Module):
         """
         proj = 2 * torch.pi * torch.matmul(x_coords, self.B.t())  # (B, N, F)
 
-        # Verkette Sinus und Cosinus, um die Phasenverschiebung zu lernen
+        # Chain sine and cosine to learn phase shift
         return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)  # (B, N, 2*F)
 
 # =============================================================================
@@ -62,7 +62,7 @@ class SinusoidalMultiScaleLocEncoder(nn.Module):
             self.output_dim = loc_encoding_dim
         elif mode == 'multiscale_dotproduct':
             num_scales = loc_encoding_dim // 2
-            # Logarithmisch verteilte Frequenzen + Zufallsrichtungen
+            # Logarithmically distributed frequencies + random directions
             freqs = np.logspace(np.log10(min_freq), np.log10(max_freq), num_scales)
             dirs = torch.nn.functional.normalize(torch.randn(num_scales, 2), dim=-1)
             self.B = nn.Parameter(torch.tensor(freqs, dtype=torch.float32).unsqueeze(1) * dirs)
@@ -152,7 +152,7 @@ class FourierPolygonGraph(nn.Module):
         polygon_tensor = polygon_tensor.to(self.device)
         n = polygon_tensor.size(0)
 
-        # Zufällige zyklische Rotation
+        # Random cyclic rotation
         shift = torch.randint(0, n, (1,), device=self.device).item()
         polygon_tensor = torch.roll(polygon_tensor, shifts=-shift, dims=0)
 
@@ -170,63 +170,49 @@ class PolygonGraphBuilder(nn.Module):
                  loc_encoding_dim: int = 64,
                  loc_encoding_min_freq: float = 1.0,
                  loc_encoding_max_freq: float = 5600.0,
-                 loc_encoding_type: str = 'multiscale_dotproduct',
+                 loc_encoding_type: str = 'multiscale_learnable',
                  use_edge_attr: bool = True,
                  eps: float = 1e-6):
         super().__init__()
         self.use_edge_attr = use_edge_attr
-        self.eps = eps
+
         self.loc_encoder = SinusoidalMultiScaleLocEncoder(
             loc_encoding_dim=loc_encoding_dim,
             min_freq=loc_encoding_min_freq,
             max_freq=loc_encoding_max_freq,
             mode=loc_encoding_type
         )
-        # Fourier-Features (Position) + Vektor zum Schwerpunkt (Rotation/Skala)
-        self.output_dim = self.loc_encoder.output_dim #+ 2
-        # Kanten-Dimension: Kantenvektor (2D) + Kantenlänge (1D)
+
+        self.output_dim = self.loc_encoder.output_dim
+
+        # Edge dimensions: dx, dy (2) + length (1) = 3
+        # + sine/cosine angle (2) = 5
         self.edge_dim = 3 if use_edge_attr else 0
 
+
     def forward(self, data):
-        device = data.pos.device
-        num_nodes = data.num_nodes
-        nodes = torch.arange(num_nodes, device=device)
+        # --- 1. Node features (absolute position) ---
+        # We use the positions from the batch directly.
+        data.x = self.loc_encoder(data.pos.unsqueeze(0))[0]
+        
 
-        # --- 1. Kanten-Erstellung ---
-        next_nodes = nodes + 1
-        next_nodes[data.ptr[1:] - 1] = data.ptr[:-1]  # Zyklischer Abschluss pro Graph
-
-        data.edge_index = torch.stack([
-            torch.cat([nodes, next_nodes]),
-            torch.cat([next_nodes, nodes])
-        ], dim=0)
-
-        # --- 2. Knotenfeatures ---
-        # a) Berechne den Schwerpunkt als globalen Referenzpunkt
-        # centroid = global_mean_pool(data.pos, data.batch)  # Shape: (num_graphs, 2)
-        # Erweitere den Centroid, um ihn von den Knotenpositionen abziehen zu können
-        #centroid_expanded = centroid[data.batch]  # Shape: (num_nodes, 2)
-
-        # b) Erstelle die varianten Knotenfeatures
-        # Absolute Position via Fourier-Features -> für Translationsvarianz
-        loc_encoded = self.loc_encoder(data.pos.unsqueeze(0))[0]
-
-        # Vektor vom Schwerpunkt zum Knoten -> für Rotations- und Skalierungsvarianz
-        # centroid_to_node_vectors = data.pos - centroid_expanded
-
-        # c) Kombiniere die Features
-        data.x = loc_encoded #torch.cat([loc_encoded, centroid_to_node_vectors], dim=1)
-
-        # --- 3. Kantenfeatures (NEU) ---
+        # --- 2. Edge features ---
         if self.use_edge_attr:
             src, dst = data.edge_index
 
-            # Kantenvektor 'dirs' -> rotations- & skalierungsvariant
+            # Vector between nodes (dx, dy) -> Rotation & scaling variant
             dirs = data.pos[dst] - data.pos[src]
 
-            # Kantenlänge 'lengths' -> skalierungsvariant
+            # Euclidean distance -> Scaling variant
             lengths = torch.norm(dirs, dim=1, keepdim=True)
+            
+            # --- Edge angle (absolute) ---
+            # Generalisation removes points, but the ‘direction’ of the line remains similar.
+            # angles = torch.atan2(dirs[:, 1], dirs[:, 0]).unsqueeze(1)
+            # We encode the angle as sin/cos to avoid the jump from pi to -pi.
+            # angles_emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=1)
 
+            # Assembling: [dx, dy, length, sin_angle, cos_angle] angles_emb
             data.edge_attr = torch.cat([dirs, lengths], dim=1)
 
         return data
@@ -248,63 +234,9 @@ class PolygonMessagePassing(MessagePassing):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
     def message(self, x_j, edge_attr):
-        # Erstellt eine Nachricht aus den Features des Nachbarknotens und der Kante
+        # Creates a message from the features of the neighbouring node and the edge
         return self.msg_net(torch.cat([x_j, edge_attr], dim=-1))
 
     def update(self, aggr_out, x):
-        # Aktualisiert den Knotenvektor basierend auf aggregierten Nachrichten
+        # Updates the node vector based on aggregated messages
         return self.update_net(torch.cat([x, aggr_out], dim=-1))
-
-
-class CrossAttentionPooling(nn.Module):
-    def __init__(self, hidden_dim: int, num_queries: int = 4, num_heads: int = 4):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_queries = num_queries
-        self.num_heads = num_heads
-        assert hidden_dim % num_heads == 0, "hidden_dim muss durch num_heads teilbar sein"
-        self.head_dim = hidden_dim // num_heads
-        
-        # Feste räumliche Ankerpunkte (nicht trainierbar, translation-variant)
-        self.register_buffer("pool_query_pos", torch.randn(num_queries, 2))
-        
-        # Mappe 2D-Positionen der Anker in den Feature-Space
-        self.query_proj = nn.Linear(2, hidden_dim)
-    
-    def forward(self, x: torch.Tensor, node_pos: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        # B = Anzahl Graphen im Batch
-        B = batch.max().item() + 1 if batch.numel() > 0 else 1
-        
-        # 1) Queries aus den festen Ankern generieren -> [B, Q, H]
-        queries = self.query_proj(self.pool_query_pos).unsqueeze(0).expand(B, -1, -1)
-        
-        # 2) Graph-Knoten in dichten Tensor packen (Padding für kleinere Graphen)
-        #    x_packed: [B, N_max, H]
-        #    mask:     [B, N_max]  (True = echter Knoten, False = Padding)
-        x_packed, mask = to_dense_batch(x, batch, fill_value=0)
-        
-        # 3) In Heads aufteilen (Q, K, V)
-        q = queries.view(B, self.num_queries, self.num_heads, self.head_dim).transpose(1, 2)  # [B, heads, Q, head_dim]
-        k = x_packed.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)               # [B, heads, N, head_dim]
-        v = x_packed.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)               # [B, heads, N, head_dim]
-        
-        # 4) Create attention mask from padding mask
-        # Convert mask to attention mask format: [B, 1, Q, N] or [B, heads, Q, N]
-        # mask shape: [B, N_max], we need [B, 1, Q, N_max] for broadcasting
-        attn_mask = mask.unsqueeze(1).unsqueeze(1).expand(-1, 1, self.num_queries, -1)
-        # Convert to float and set padded positions to -inf
-        attn_mask = attn_mask.float()
-        attn_mask = attn_mask.masked_fill(~attn_mask.bool(), float('-inf'))
-        attn_mask = attn_mask.masked_fill(attn_mask.bool(), 0.0)
-        
-        # 5) Scaled Dot-Product Attention (correct API)
-        pooled = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        
-        # 6) Heads wieder zusammenführen -> [B, Q, H]
-        pooled = pooled.transpose(1, 2).contiguous().view(B, self.num_queries, self.hidden_dim)
-        
-        # 7) Über Queries aggregieren (max + mean)
-        pooled_max = pooled.max(dim=1).values
-        pooled_mean = pooled.mean(dim=1)
-        
-        return torch.cat([pooled_max, pooled_mean], dim=-1)

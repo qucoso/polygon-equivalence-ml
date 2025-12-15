@@ -7,6 +7,7 @@ import argparse
 import mlflow
 import optuna
 import psutil
+import shutil 
 from optuna.pruners import MedianPruner
 from optuna.importance import get_param_importances
 from copy import deepcopy
@@ -152,26 +153,26 @@ def run_trial(config: dict, model_mode:str, trial: optuna.trial.Trial = None, gp
 
         if trial:
             config["tqdm_loader"] = False
-            config["hyperparameter"]["lr"] = trial.suggest_float("lr", 1e-6, 1e-3, log=True)
-            config["hyperparameter"]["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+            # config["hyperparameter"]["lr"] = trial.suggest_float("lr", 1e-6, 1e-3, log=True)
+            # config["hyperparameter"]["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
             # config["scheduler"]["type"] = trial.suggest_categorical("scheduler_type", ["onecycle", "cosine"])
             # config["scheduler"]["warm_up"] = trial.suggest_float("warm_up", 0.01, 0.3, step=0.03)
 
-            config["miner"]["triplet_margin"] = trial.suggest_float("triplet_margin", 0.2, 1.5, step=0.1)
+            # config["miner"]["triplet_margin"] = trial.suggest_float("triplet_margin", 0.2, 1.5, step=0.1)
             # config["miner"]["type_of_triplets"] = trial.suggest_categorical(
             #     "type_of_triplets", ["semihard", "hard", "all"]
             #     )
 
             if model_mode == "graph" :
-                pass
+                # pass
                 # config["graph_encoder"]["graph_encoder_type"] = trial.suggest_categorical("graph_encoder_type", ["gin", "gat", "mp"])
-                # config["graph_encoder"]["num_heads"] = trial.suggest_categorical("num_heads", [2, 4, 8])
-                # config["graph_encoder"]["hidden_dim"] = trial.suggest_categorical("hidden_dim", [32, 64, 96])
-                # config["graph_encoder"]["embedding_dim"] = trial.suggest_categorical("embedding_dim", [32, 64, 128])
-                # config["graph_encoder"]["num_layers"] = trial.suggest_int("num_layers", 2, 10)
-                # config["graph_encoder"]["dropout"] = trial.suggest_float("dropout", 0.0, 0.3)
-                # config["graph_encoder"]["num_heads"] = trial.suggest_categorical("num_heads", [2, 4, 8, 16])
-                # config["graph_encoder"]["loc_encoding_dim"] = trial.suggest_categorical("loc_encoding_dim", [8, 16, 32, 64])
+                config["graph_encoder"]["num_heads"] = trial.suggest_categorical("num_heads", [2, 4, 8])
+                config["graph_encoder"]["hidden_dim"] = trial.suggest_categorical("hidden_dim", [32, 64, 96])
+                config["graph_encoder"]["embedding_dim"] = trial.suggest_categorical("embedding_dim", [32, 64, 128])
+                config["graph_encoder"]["num_layers"] = trial.suggest_int("num_layers", 2, 10)
+                config["graph_encoder"]["dropout"] = trial.suggest_float("dropout", 0.0, 0.3)
+                config["graph_encoder"]["loc_encoding_dim"] = trial.suggest_categorical("loc_encoding_dim", [8, 16, 32, 64])
+                config["dataset"]["lap_pe_k"] = trial.suggest_categorical("lap_pe_k", [5, 7, 10])
             else:
                 d_arch = trial.suggest_categorical("d_arch", [64, 96])
                 config["perceiver_encoder"]["d_model"] = d_arch
@@ -385,7 +386,20 @@ if __name__ == "__main__":
             logger.info(f"Using provided timestamp for study name: {timestamp}")
 
         study_name = f"{model_mode}_Optuna_{timestamp}"
-        storage_url = f"sqlite:///./{study_name}.db"
+        db_filename = f"{study_name}.db"
+
+        tmp_dir = os.environ.get("TMPDIR", "/tmp") 
+        tmp_db_path = os.path.join(tmp_dir, db_filename)
+
+        final_db_path = os.path.join(os.getcwd(), db_filename)
+        logger.info(f"Working with temporary DB at: {tmp_db_path}")
+
+        if os.path.exists(final_db_path):
+            logger.info(f"Found existing DB at {final_db_path}. Copying to {tmp_dir}...")
+            shutil.copy2(final_db_path, tmp_db_path)
+
+        # Optuna nutzt jetzt den lokalen Pfad
+        storage_url = f"sqlite:///{tmp_db_path}"
 
         study = optuna.create_study(
             direction="maximize",
@@ -395,12 +409,34 @@ if __name__ == "__main__":
             pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=4)
         )
 
-        with mlflow.start_run(run_name=f"Optuna_{run_identifier}"):
-            try:
-                study.optimize(objective, n_trials=args.n_trials)
-            except KeyboardInterrupt:
-                logger.warning("\nOptuna study manually stopped.")
+        try:
+            with mlflow.start_run(run_name=f"Optuna_{run_identifier}"):
+                try:
+                    study.optimize(objective, n_trials=args.n_trials)
+                except KeyboardInterrupt:
+                    logger.warning("\nOptuna study manually stopped.")
+        
+        except Exception as e:
+            logger.error(f"An error occurred during optimization: {e}")
+            raise e # Fehler weiterwerfen, damit der Job als Failed markiert wird
 
+        finally:
+            # --- SCHRITT 4: Rücksicherung ---
+            # Dieser Block wird IMMER ausgeführt, auch bei Crash oder Timeout
+            logger.info("🔄 Copying database back from temporary storage to Home...")
+            if os.path.exists(tmp_db_path):
+                try:
+                    shutil.copy2(tmp_db_path, final_db_path)
+                    logger.info(f"✅ Database successfully saved to: {final_db_path}")
+                    
+                    # Optional: Aufräumen in /tmp
+                    os.remove(tmp_db_path)
+                except Exception as e:
+                    logger.error(f"❌ Failed to copy database back! Data is still in {tmp_db_path}. Error: {e}")
+            else:
+                logger.warning("⚠️ No temporary database file found to copy back.")
+
+        # --- Reporting (nur wenn erfolgreich) ---
         logger.info("\n" + "=" * 50)
         logger.info("Optuna study complete!")
         logger.info(f"Number of finished trials: {len(study.trials)}")

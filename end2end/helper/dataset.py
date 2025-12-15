@@ -22,7 +22,7 @@ class PairPolygonDataset(Dataset):
             positive_ratio: float = 0.5,
             model_mode: str = "graph",
             augmenter=None,
-            k_eigvecs: int = 10  # Anzahl der Eigenvektoren für Graph Transformer
+            k_eigvecs: int = 10  # Number of eigenvectors for graph transformer
     ):
         self.parquet_path = parquet_path
         self.model_mode = model_mode
@@ -52,7 +52,7 @@ class PairPolygonDataset(Dataset):
             self.hard_candidates = json.load(f)
 
     def __len__(self) -> int:
-        return len(self.polygon_ids) * 10  # ein künstlich größeres Epoch
+        return len(self.polygon_ids) * 10
 
     def _random_roll(self, pos: torch.Tensor) -> torch.Tensor:
         n = pos.size(0)
@@ -69,39 +69,39 @@ class PairPolygonDataset(Dataset):
 
     def _compute_ring_pe(self, num_nodes: int, k: int) -> torch.Tensor:
         """
-        Berechnet analytisch die Laplacian Eigenvektoren für einen Ring-Graphen.
-        Sehr schnell (O(N)), keine teure Eigendecomposition nötig.
+        Analytically calculates the Laplacian eigenvectors for a ring graph.
+        Very fast (O(N)), no expensive eigen decomposition required.
         """
         if num_nodes < 3:
             return torch.zeros((num_nodes, k))
 
-        # Indizes n und Frequenzen
+        # Indices n and frequencies
         n = torch.arange(num_nodes, dtype=torch.float32).unsqueeze(1)
-        # Wir brauchen k Features, also k/2 Frequenzen (da sin+cos Paare)
+        # We need k features, i.e. k/2 frequencies (since sin+cos pairs)
         num_freqs = (k + 1) // 2
         freqs = torch.arange(1, num_freqs + 1, dtype=torch.float32).unsqueeze(0)
 
         # Argument: 2 * pi * k * n / N
         arg = 2 * np.pi * freqs * n / num_nodes
 
-        # Sinus und Cosinus Komponenten
+        # Sine and cosine components
         pe = torch.cat([torch.cos(arg), torch.sin(arg)], dim=1)
 
-        # Auf exakt k Dimensionen zuschneiden (falls k ungerade war)
+        # Cut to exactly k dimensions (if k was odd)
         return pe[:, :k]
 
     def _build_graph_data(self, coordinates: torch.Tensor) -> Data:
-        """Erstellt PyG Data mit Ring-Topologie und LapPE."""
+        """Creates PyG Data with ring topology and LapPE."""
         num_nodes = coordinates.size(0)
 
-        # 1. Kanten erstellen (Ring: 0-1, 1-2, ..., N-0)
+        # 1. Create edges (ring: 0-1, 1-2, ..., N-0)
         source = torch.arange(num_nodes, dtype=torch.long)
         target = torch.roll(source, -1)
         edge_index = torch.stack([source, target], dim=0)
-        # Ungerichtet machen
+        # Make it undirected
         edge_index = to_undirected(edge_index, num_nodes=num_nodes)
 
-        # 2. Analytische Positional Encodings
+        # 2. Analytical Positional Encodings
         eigvecs = self._compute_ring_pe(num_nodes, self.k_eigvecs)
 
         return Data(x=coordinates, pos=coordinates, edge_index=edge_index, eigvecs=eigvecs)
@@ -164,7 +164,6 @@ class PairPolygonDataset(Dataset):
         poly2 = self._random_roll(poly2)
 
         if self.model_mode == "graph":
-            # Hier bauen wir den Graphen inklusive PE
             poly1 = self._build_graph_data(poly1)
             poly2 = self._build_graph_data(poly2)
 
@@ -279,7 +278,6 @@ class EvaluationPolygonDataset(Dataset):
         polygon = torch.tensor(coordinates, dtype=torch.float)
 
         if self.model_mode == "graph":
-            # Auch hier: Graph + PE bauen
             num_nodes = polygon.size(0)
             source = torch.arange(num_nodes, dtype=torch.long)
             target = torch.roll(source, -1)
@@ -292,11 +290,11 @@ class EvaluationPolygonDataset(Dataset):
 
 def eval_collate_fn_seq(batch):
     polygons, polygon_ids = zip(*batch)
-    # Berechne Längen für Masken
+    # Calculate lengths for masks
     lengths = torch.tensor([poly.size(0) for poly in polygons], dtype=torch.long)
-    # Padding anwenden
+    # Apply padding
     polygons_padded = pad_sequence(polygons, batch_first=True, padding_value=0.0)
-    # Masken erstellen (True für Padding-Positionen)
+    # Create masks (true for padding positions)
     max_len = polygons_padded.size(1)
     idx_range = torch.arange(max_len).unsqueeze(0)
     masks = (idx_range >= lengths.unsqueeze(1))

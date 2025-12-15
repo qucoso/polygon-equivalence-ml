@@ -3,3 +3,4 @@ logs
 mlruns
 model
 __pycache__/
+*.db
