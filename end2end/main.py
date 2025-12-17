@@ -90,7 +90,7 @@ def load_encoder_from_mlflow(run_id: str, model_path: str, logger: logging.Logge
                 "loc_encoding_max_freq": float(params.get(f'{prefix}loc_encoding_max_freq', 5600.0)),
                 "graph_encoder_type": params.get(f'{prefix}graph_encoder_type', 'gat'),
                 "use_edge_attr": str(params.get(f'{prefix}use_edge_attr', 'False')).lower() == 'true',
-                "lap_pe_k": int(params.get(f'{prefix}lap_pe_k', 10)),
+                # "lap_pe_k": int(params.get(f'{prefix}lap_pe_k', 10)),
             }
             encoder = GraphPolygonEncoder(**encoder_kwargs)
 
@@ -172,7 +172,7 @@ def run_trial(config: dict, model_mode:str, trial: optuna.trial.Trial = None, gp
                 config["graph_encoder"]["num_layers"] = trial.suggest_int("num_layers", 2, 10)
                 config["graph_encoder"]["dropout"] = trial.suggest_float("dropout", 0.0, 0.3)
                 config["graph_encoder"]["loc_encoding_dim"] = trial.suggest_categorical("loc_encoding_dim", [8, 16, 32, 64])
-                config["dataset"]["lap_pe_k"] = trial.suggest_categorical("lap_pe_k", [5, 7, 10])
+                # config["dataset"]["lap_pe_k"] = trial.suggest_categorical("lap_pe_k", [5, 7, 10])
             else:
                 d_arch = trial.suggest_categorical("d_arch", [64, 96])
                 config["perceiver_encoder"]["d_model"] = d_arch

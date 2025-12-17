@@ -82,12 +82,13 @@ class PairPolygonDataset(Dataset):
         freqs = torch.arange(1, num_freqs + 1, dtype=torch.float32).unsqueeze(0)
 
         # Argument: 2 * pi * k * n / N
-        arg = 2 * np.pi * freqs * n / num_nodes
+        arg = 2 * torch.pi * freqs * n / num_nodes
 
         # Sine and cosine components
-        pe = torch.cat([torch.cos(arg), torch.sin(arg)], dim=1)
-
-        # Cut to exactly k dimensions (if k was odd)
+        cos_part = torch.cos(arg) * (2.0 / num_nodes) ** 0.5
+        sin_part = torch.sin(arg) * (2.0 / num_nodes) ** 0.5
+        
+        pe = torch.cat([cos_part, sin_part], dim=1)
         return pe[:, :k]
 
     def _build_graph_data(self, coordinates: torch.Tensor) -> Data:
@@ -104,7 +105,7 @@ class PairPolygonDataset(Dataset):
         # 2. Analytical Positional Encodings
         eigvecs = self._compute_ring_pe(num_nodes, self.k_eigvecs)
 
-        return Data(x=coordinates, pos=coordinates, edge_index=edge_index, eigvecs=eigvecs)
+        return Data(pos=coordinates, edge_index=edge_index, eigvecs=eigvecs)
 
     def __getitem__(self, index: int):
         anchor_idx = index % len(self.polygon_ids)
@@ -223,7 +224,7 @@ def get_dataloader(config, model_mode="graph"):
         positive_ratio=config["dataset"].get("positive_ratio", 0.5),
         model_mode=model_mode,
         augmenter=augmenter,
-        k_eigvecs=config["dataset"].get("k_eigvecs", 10)
+        k_eigvecs=config["graph_encoder"].get("k_eigvecs", 10)
     )
 
     collate_fn = collate_graph_pairs if model_mode == "graph" else collate_pair_sequence

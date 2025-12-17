@@ -4,9 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, GINEConv, global_add_pool, global_mean_pool, TransformerConv, global_max_pool
 from torch_geometric.nn import MessagePassing, global_max_pool, BatchNorm, LayerNorm
-from helper.helper_architecture import PolygonMessagePassing, PolygonGraphBuilder, CrossAttentionPooling
+from helper.helper_architecture import PolygonMessagePassing, PolygonGraphBuilder
 from torch_geometric.data import Batch
-from torch_geometric.utils import softmax
+from torch_geometric.utils import softmax, to_dense_batch
 
 # =============================================================================
 # 1. Encoder Graph Isomorphism Network
@@ -20,12 +20,14 @@ class PolygonGINEEncoder(nn.Module):
                  embedding_dim=128,
                  num_layers=5,
                  dropout=0.1,
-                 pooling_strategy='attention'):
+                 pooling_strategy='attention',
+                 use_jumping_knowledge=False):
         super().__init__()
 
         self.input_proj = nn.Linear(input_dim, hidden_dim)
         self.gin_layers = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
+        self.use_jumping_knowledge = use_jumping_knowledge
 
         for _ in range(num_layers):
             nn_block = nn.Sequential(
@@ -40,7 +42,10 @@ class PolygonGINEEncoder(nn.Module):
             self.batch_norms.append(BatchNorm(hidden_dim))
 
         # Jumping Knowledge-Verbindung bleibt erhalten
-        self.jump = nn.Linear(num_layers * hidden_dim, hidden_dim)
+        if self.use_jumping_knowledge:
+            self.jump = nn.Linear(num_layers * hidden_dim, hidden_dim)
+        else:
+            self.jump = None
 
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, embedding_dim),
@@ -61,22 +66,23 @@ class PolygonGINEEncoder(nn.Module):
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         
         x = self.input_proj(x)
-        layer_outputs = []
+        layer_outputs = [] if self.use_jumping_knowledge else None
 
         for conv, norm in zip(self.gin_layers, self.batch_norms):
             x_res = x
-            
             x_norm = norm(x)
-            
             x_conv = conv(x_norm, edge_index, edge_attr=edge_attr)
-            
             x = x_res + x_conv
             
-            layer_outputs.append(x)
+            if self.use_jumping_knowledge:
+                layer_outputs.append(x)
 
         # Jumping Knowledge
-        x_cat = torch.cat(layer_outputs, dim=-1)
-        x_final = self.jump(x_cat)
+        if self.use_jumping_knowledge:
+            x_final = torch.cat(layer_outputs, dim=-1)
+            x_final = self.jump(x_final)
+        else:
+            x_final = x
 
         # Pooling
         if self.pooling_strategy == 'attention':
@@ -219,11 +225,7 @@ class PolygonMessageEncoder(nn.Module):
             self.layer_norms.append(nn.LayerNorm(hidden_dim))
 
         self.pooling_strategy = pooling_strategy
-        if pooling_strategy == 'cross_attention':
-            self.cross_attention_pool = CrossAttentionPooling(hidden_dim, num_queries, num_heads=4)
-            # Cross-attention returns 2 * hidden_dim (max + mean)
-            pooled_dim = 2 * hidden_dim
-        elif pooling_strategy == 'attention':
+        if pooling_strategy == 'attention':
             self.attention_pool_linear = nn.Linear(hidden_dim, 1)
             pooled_dim = hidden_dim
         else:
@@ -280,6 +282,9 @@ class GraphPolygonEncoder(nn.Module):
                  embedding_dim: int = 128,
                  num_heads: int = 4,
                  num_layers: int = 3,
+                 num_latents: int = 16,
+                 k_eigvecs: int = 10,
+                 num_perceiver_iterations: int = 2,
                  dropout: float = 0.1,
                  pooling_strategy: str = 'attention',
                  loc_encoding_dim: int = 64,
@@ -287,9 +292,7 @@ class GraphPolygonEncoder(nn.Module):
                  loc_encoding_max_freq: float = 5600.0,
                  loc_encoding_type: str = "multiscale_learnable",
                  graph_encoder_type: str = "gat",
-                 use_edge_attr: bool = True,
-                 lap_pe_k: int = 10,
-                 norm_type: str = 'batch' 
+                 use_edge_attr: bool = True
                  ):
         super().__init__()
 
@@ -333,19 +336,18 @@ class GraphPolygonEncoder(nn.Module):
                 pooling_strategy=pooling_strategy
             )
 
-        elif graph_encoder_type == "GraphTransformer":
-            self.encoder = PolygonGraphTransformerEncoder(
+        elif graph_encoder_type == "GraphPerceiver":
+            self.encoder = PolygonTransformerPerceiver(
                 input_dim=self.graph_builder.output_dim,
                 edge_dim=self.graph_builder.edge_dim,
                 hidden_dim=hidden_dim,
+                k_eigvecs=k_eigvecs,
                 embedding_dim=embedding_dim,
-                num_heads=num_heads,
                 num_layers=num_layers,
-                dropout=dropout,
-                pooling_strategy=pooling_strategy,
-                use_laplacian_pe=True,
-                lap_pe_k=lap_pe_k,
-                norm_type=norm_type
+                heads=num_heads,
+                num_latents=8,
+                num_perceiver_iterations=num_perceiver_iterations,
+                dropout=dropout
             )
 
 
@@ -357,163 +359,183 @@ class GraphPolygonEncoder(nn.Module):
         return embedding
 
 # =============================================================================
-# 4. Encoder Graph Transformer
+# 4. Encoder Graph Transformer with Perceiver Aggregator
 # =============================================================================
 
-class GraphTransformerBlock(nn.Module):
-    """
-    A single graph transformer block.
-    Structure: Norm -> Attention (with edge features) -> Residual -> Norm -> Feed Forward -> Residual
-    """
-    def __init__(self, in_dim, out_dim, heads, dropout, edge_dim, norm_type='layer'):
+# --- 1. Der Perceiver Aggregator ---
+class PerceiverAggregator(nn.Module):
+    def __init__(self, input_dim, num_latents=64, num_heads=4, 
+                 dropout=0.1, num_iterations=2):
         super().__init__()
+        self.num_latents = num_latents
+        self.num_iterations = num_iterations
+        self.latents = nn.Parameter(torch.randn(1, num_latents, input_dim) * 0.02)
         
-        # 1. Attention Layer
-        # This layer also calculates attention scores based on edge attributes.
-        # Important: out_channels per head is out_dim // heads.
-        self.attn = TransformerConv(
-            in_channels=in_dim,
-            out_channels=out_dim // heads, 
-            heads=heads,
-            dropout=dropout,
-            edge_dim=edge_dim,
-            beta=True, # Learns a gating mechanism (bias) in the attention step
-            concat=True # Concatenates the heads (default for Transformer)
+        # Cross Attention
+        self.cross_attn = nn.MultiheadAttention(
+            input_dim, num_heads, batch_first=True, dropout=dropout
         )
+        self.cross_norm = nn.LayerNorm(input_dim)
         
-        # 2. Normalization
-        # Standard transformers use LayerNorm.
-        if norm_type == 'batch':
-            self.norm1 = nn.BatchNorm1d(out_dim)
-            self.norm2 = nn.BatchNorm1d(out_dim)
-        else:
-            self.norm1 = nn.LayerNorm(out_dim)
-            self.norm2 = nn.LayerNorm(out_dim)
+        # Self Attention
+        self.self_attn = nn.MultiheadAttention(
+            input_dim, num_heads, batch_first=True, dropout=dropout
+        )
+        self.self_norm = nn.LayerNorm(input_dim)
         
-        # 3. Feed Forward Network (FFN)
-        # Standard MLP block as in any transformer
+        # FFN (Feed-Forward Network)
         self.ffn = nn.Sequential(
-            nn.Linear(out_dim, out_dim * 2),
+            nn.Linear(input_dim, input_dim * 4),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(out_dim * 2, out_dim)
+            nn.Linear(input_dim * 4, input_dim),
+            nn.Dropout(dropout)
         )
+        self.ffn_norm = nn.LayerNorm(input_dim)
         
-        self.dropout_val = dropout
+        self.dropout = nn.Dropout(dropout)
 
+    def forward(self, x, batch):
+        x_dense, mask = to_dense_batch(x, batch)
+        B = x_dense.shape[0]
+        latents = self.latents.expand(B, -1, -1)
+        padding_mask = ~mask
+        
+        for _ in range(self.num_iterations):
+            # 1. Cross-Attention (Read from graph)
+            attn_out, _ = self.cross_attn(
+                query=latents, key=x_dense, value=x_dense,
+                key_padding_mask=padding_mask
+            )
+            latents = self.cross_norm(latents + self.dropout(attn_out))
+            
+            # 2. Self-Attention (Process)
+            self_out, _ = self.self_attn(latents, latents, latents)
+            latents = self.self_norm(latents + self.dropout(self_out))
+            
+            # 3. FFN
+            latents = self.ffn_norm(latents + self.ffn(latents))
+        
+        return latents
+        
+class LocalTransformerBlock(nn.Module):
+    def __init__(self, hidden_dim, edge_dim, heads, dropout):
+        super().__init__()
+        self.conv = TransformerConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim // heads,
+            heads=heads,
+            edge_dim=edge_dim,
+            dropout=dropout
+        )
+        self.norm1 = LayerNorm(hidden_dim)
+        
+        # FFN Block
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        self.norm2 = LayerNorm(hidden_dim)
+    
     def forward(self, x, edge_index, edge_attr):
-        # --- Attention Sub-Layer ---
-        x_in = x
-        
-        # Pre-normalization (often more stable training for deep networks)
-        x = self.norm1(x)
-        
-        # Attention calculation with edge features
-        x = self.attn(x, edge_index, edge_attr=edge_attr)
-        
-        # Residual Connection
-        x = x_in + F.dropout(x, p=self.dropout_val, training=self.training)
-        
-        # --- Feed Forward Sub-Layer ---
-        x_in = x
-        x = self.norm2(x)
-        x = self.ffn(x)
-        
-        # Residual Connection
-        x = x_in + F.dropout(x, p=self.dropout_val, training=self.training)
-        
+        # Pre-Norm Style (stabiler für tiefe Netze)
+        x = x + self.conv(self.norm1(x), edge_index, edge_attr=edge_attr)
+        x = x + self.ffn(self.norm2(x))
         return x
 
+class LapPENodeEncoder(nn.Module):
+    def __init__(self, in_dim, hidden_dim, dropout=0.1):
+        super().__init__()
+        # Projiziert die k Eigenvektoren auf die hidden_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Dropout(dropout)
+        )
 
-class PolygonGraphTransformerEncoder(nn.Module):
+    def forward(self, x, eigvecs):
+        """
+        x: [num_nodes, hidden_dim] (Node Features nach input_proj)
+        eigvecs: [num_nodes, k_eigvecs] (Vom Dataset)
+        """
+        if eigvecs is None:
+            return x
+        
+        # PE Embedding berechnen
+        pe_emb = self.mlp(eigvecs)
+
+        return x + pe_emb
+
+class PolygonTransformerPerceiver(nn.Module):
     def __init__(self,
                  input_dim,
                  edge_dim,
                  hidden_dim=64,
                  embedding_dim=128,
-                 num_heads=4,
-                 num_layers=3,
-                 dropout=0.1,
-                 pooling_strategy='max',
-                 use_laplacian_pe=False, # Adjustment parameter: Positional Encoding
-                 lap_pe_k=10,  # Adjustment parameter: Number of LapPE dimensions
-                 norm_type='layer'):     # Adjustment parameter: Normalization type
+                 k_eigvecs=10,
+                 num_layers=4,
+                 heads=4,
+                 num_latents=32,
+                 num_perceiver_iterations=2,
+                 dropout=0.1):
         super().__init__()
-
-        # Input Projection
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+    
         
-        # Optional: Laplacian Positional Encoding (LapPE)
-        self.use_laplacian_pe = use_laplacian_pe
-        if use_laplacian_pe:
-            self.pe_proj = nn.Linear(lap_pe_k, hidden_dim) 
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
 
-        # Stack of transformer blocks
-        self.layers = nn.ModuleList()
-        for _ in range(num_layers):
-            self.layers.append(
-                GraphTransformerBlock(
-                    in_dim=hidden_dim, 
-                    out_dim=hidden_dim, 
-                    heads=num_heads, 
-                    dropout=dropout, 
-                    edge_dim=edge_dim,
-                    norm_type=norm_type
-                )
-            )
-
-        # Output projection
+        # 2. Positional Encoding Encoder
+        self.pe_encoder = LapPENodeEncoder(
+            in_dim=k_eigvecs, 
+            hidden_dim=hidden_dim, 
+            dropout=dropout
+        )
+        
+        # Lokale Transformer Blocks
+        self.local_blocks = nn.ModuleList([
+            LocalTransformerBlock(hidden_dim, edge_dim, heads, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        # Perceiver Aggregator
+        self.global_aggregator = PerceiverAggregator(
+            hidden_dim,
+            num_latents=num_latents,
+            num_heads=heads,
+            dropout=dropout,
+            num_iterations=num_perceiver_iterations
+        )
+        
+        # Output
         self.output_proj = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, embedding_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(embedding_dim, embedding_dim)
         )
 
-        # Pooling strategy
-        self.pooling_strategy = pooling_strategy
-        if pooling_strategy == 'attention':
-            self.attention_pool = nn.Sequential(
-                nn.Linear(hidden_dim, 1),
-                nn.Sigmoid()
-            )
-
     def forward(self, data):
-        x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
+        x, edge_index, edge_attr, batch, eigvecs = \
+            data.x, data.edge_index, data.edge_attr, data.batch, data.eigvecs
         
-        # 1. Feature Projection
+        # 1. Input Projection
         x = self.input_proj(x)
-
-        # 2. Additive Positional Encoding (if enabled)
-        # Graph transformers require positional information because attention is inherently "position-blind".
-        if self.use_laplacian_pe and hasattr(data, 'eigvecs'):
-            # Random sign flip trick from [1] for robustness
-            eigvecs = data.eigvecs
-            if self.training:
-                sign_flip = torch.rand(eigvecs.size(1), device=x.device) < 0.5
-                sign_flip = sign_flip.float() * 2 - 1
-                eigvecs = eigvecs * sign_flip.unsqueeze(0)
-            
-            # Add projected eigenvectors to node feature
-            x = x + self.pe_proj(eigvecs)
-
-        # 3. Passing through the transformer blocks
-        for layer in self.layers:
-            x = layer(x, edge_index, edge_attr)
-
-        # 4. Pooling (creating graph embedding)
-        if self.pooling_strategy == 'attention':
-            att_weights = self.attention_pool(x)
-            pooled = global_add_pool(x * att_weights, batch)
-        elif self.pooling_strategy == 'mean':
-            pooled = global_mean_pool(x, batch)
-        elif self.pooling_strategy == 'max':
-            pooled = global_max_pool(x, batch)
-        else:
-            pooled = global_mean_pool(x, batch)
-
-        # 5. Final Embedding
-        embedding = self.output_proj(pooled)
-        embedding = F.normalize(embedding, dim=-1)
-        return embedding
-
+        x = self.pe_encoder(x, eigvecs)
+        
+        # 2. Local Message Passing
+        for block in self.local_blocks:
+            x = block(x, edge_index, edge_attr)
+        
+        # 3. Global Aggregation
+        latents = self.global_aggregator(x, batch)
+        
+        # 4. Pool & Project
+        graph_embedding = latents.mean(dim=1)
+        out = self.output_proj(graph_embedding)
+        out = F.normalize(out, dim=-1)
+        
+        return out

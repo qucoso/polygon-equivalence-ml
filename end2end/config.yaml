@@ -6,10 +6,10 @@ calculate_threshold: True
 calculate_accuracy: False
 
 hyperparameter:
-  # lr: 0.0002
+  lr: 0.0007
+  weight_decay: 0.000006
+  # lr: 0.00001
   # weight_decay: 0.00003
-  lr: 0.00001
-  weight_decay: 0.00003
 
 miner:
   miner_type: "triplet"             # "multi" oder "triplet"
@@ -25,11 +25,11 @@ dataset:
   hard_candidates_path: "../../data/hard_negative_candidates.json"
   intersection_path: "../../data/intersections_pairs.csv" 
   negative_strategies:
-    modify: 0.6
-    same_center_different_shape: 0.1
+    modify: 0.44
+    same_center_different_shape: 0.2
     random_other: 0.1
-    cluster: 0.15
-    intersecting: 0.05
+    cluster: 0.2
+    intersecting: 0.06
   polygon_augmentation:
     scale_ranges:
       - [0.6, 0.8]
@@ -42,7 +42,6 @@ dataset:
   val_split: 0.1
   num_workers: 14
   batch_size: 1024
-  lap_pe_k: 5
   prefetch_factor: 2
   drop_last: True
   cache_in_memory: True
@@ -51,13 +50,16 @@ early_stopping:
   patience: 15
 
 graph_encoder:
-  graph_encoder_type: "GraphTransformer"  # "gat" oder "mp" oder "gine" oder "GraphTransformer"
+  graph_encoder_type: "GraphPerceiver"  # "gat" oder "mp" oder "gine" oder "GraphPerceiver"
   hidden_dim: 64
   embedding_dim: 128
-  num_layers: 9
   num_heads: 4
-  dropout: 0.017
-  pooling_strategy: "max" # "attention" or "mean" or "max"
+  num_layers: 5
+  num_latents: 32
+  k_eigvecs: 10
+  num_perceiver_iterations: 2
+  dropout: 0.1
+  pooling_strategy: "attention" # "attention" or "mean" or "max"
   loc_encoding_dim: 8
   loc_encoding_min_freq: 1000.0
   loc_encoding_max_freq: 5600.0

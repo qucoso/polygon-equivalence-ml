@@ -14,6 +14,33 @@ This work develops and evaluates automated methods to overcome these representat
 
 A core contribution of the end-to-end models is the implementation of **robust, multiscale sinusoidal location encodings**, ensuring sensitivity to translations, rotations, and scalings without manual feature extraction.
 
+## 💾 Dataset Generation
+
+The models are trained and evaluated on a large-scale synthetic dataset containing approximately **1.9 million polygon pairs**, derived from real-world OpenStreetMap (OSM) polygons.
+
+### Positive Pairs (Equivalents)
+To simulate "geometric uncertainty," we generated equivalent pairs using **cartographic generalization**. Following the principle of *Trivial Vertex Invariance* (Mai, Jiang et al., 2022), these pairs retain semantic equality despite changes in vertex count or minor topological variations. The dataset includes six specific generalization types:
+
+1.  **Douglas-Peucker Simplification:** Applied with tolerances of 0.5%, 1.0%, and 10.0% (iterative vertex elimination).
+2.  **Morphological Smoothing:** Buffer operations (positive followed by negative) to round corners.
+3.  **Chaikin's Corner Cutting:** Recursive smoothing, significantly increasing vertex count.
+4.  **Taubin Spectral Smoothing:** Removes high-frequency noise while preserving volume.
+
+### Negative Pairs (Non-Equivalents)
+To prevent the models from learning simple distance thresholds, "Hard Negatives" were generated using specific sampling strategies. The distribution of negative pairs during training is as follows:
+
+*   **Modify (44%):** Slight perturbations of non-equivalent polygons.
+*   **Same Center, Different Shape (20%):** Distinct polygons centered at the same coordinate to penalize pure location-based matching.
+*   **Cluster (20%):** Polygons selected from the immediate neighborhood.
+*   **Random Other (10%):** Randomly selected polygons from the dataset.
+*   **Intersecting (6%):** Polygons that physically overlap (high IoU) but represent different objects.
+
+### Data Availability & Pipeline
+The data handling differs by approach:
+
+*   **Feature-based (MLP):** Uses pre-calculated feature vectors stored in static files. The complete processed dataset is available here: **[Link to Kaggle Dataset](https://www.kaggle.com/datasets/qucoso/geometric-uncertainty-dataset-osm-polygons)**.
+*   **End-to-End (Perceiver/GNN):** Uses a raw `polygons.parquet` file containing the base polygons and their generalized versions. During training, the pipeline performs **on-the-fly augmentation**, generating the specific positive and negative pairings dynamically based on the probabilities listed above.
+
 ## 📂 Repository Structure
 
 The repository is divided into two main pipelines: `featurebased` (using pre-calculated shape features) and `end2end` (learning directly from raw coordinates).
