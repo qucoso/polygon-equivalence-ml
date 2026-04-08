@@ -1,0 +1,65 @@
+num_epochs: 100                  # Maximum number of training epochs
+tqdm_loader: True                # Enable progress bar during training
+accumulation_steps: 1            # Gradient accumulation steps (no accumulation)
+save_path: "model"               # Directory to save model checkpoints
+calculate_threshold: True        # Compute optimal distance threshold on validation set
+calculate_accuracy: False        # Skip accuracy metric computation
+
+hyperparameter:
+  lr: 0.0008                     # Learning rate: 6e−5 (Table 4)
+  weight_decay: 0.00002          # Weight decay for regularization: 2e−4 (Table 4)
+
+miner:
+  miner_type: "triplet"          # Triplet-based mining strategy for metric learning
+  triplet_margin: 0.5            # Margin m in triplet loss: 0.5 (Table 4)
+  type_of_triplets: "semihard"   # Semi-hard negative mining to stabilize training
+
+scheduler:
+  type: "onecycle"               # One-cycle learning rate schedule
+  warm_up: 0.1                   # Fraction of training used for linear warm-up (10%)
+
+dataset:
+  parquet_path: "../../data/polygons.parquet"
+  hard_candidates_path: "../../data/hard_negative_candidates.json"
+  intersection_path: "../../data/intersections_pairs.csv" 
+  
+  negative_strategies:           # Sampling probabilities for negative example strategies
+    modify: 0.44                 # Augmented version of the anchor polygon (44%)
+    same_center_different_shape: 0.2  # Same centroid but different shape (20%)
+    random_other: 0.1            # Randomly sampled polygon from dataset (10%)
+    cluster: 0.2                 # Polygon from same spatial cluster (20%)
+    intersecting: 0.06           # Geometrically intersecting polygon (6%)
+
+  polygon_augmentation:
+    scale_ranges:                # Scale factors applied during augmentation
+      - [0.6, 0.8]               # Downscaling range
+      - [1.2, 1.5]               # Upscaling range
+    rotation_range: [15.0, 345.0]   # Random rotation in degrees
+    translate_range: [0.3, 3.0]     # Random translation range
+    bias_power: 1.0                 # Exponent controlling augmentation sampling bias
+
+  positive_ratio: 0.5            # Fraction of positive pairs per batch (50%)
+  train_split: 0.9               # 90% of data used for training
+  val_split: 0.1                 # 10% of data used for validation
+  num_workers: 14                # Parallel data loading workers
+  batch_size: 1024               # Number of samples per batch
+  prefetch_factor: 2             # Number of batches prefetched per worker
+  drop_last: True                # Drop incomplete last batch
+  cache_in_memory: True          # Cache dataset in RAM for faster access
+
+early_stopping:
+  patience: 20                   # Stop training if no improvement for 15 consecutive epochs
+
+graph_encoder:
+  graph_encoder_type: "gat"          # Graph Attention Network v2 (GATv2) architecture
+  hidden_dim: 64                     # Hidden layer dimensionality: 64 (Table 4)
+  embedding_dim: 128                 # Output embedding dimensionality: 128 (Table 4)
+  num_heads: 8                       # Number of attention heads in GATv2 layers: 8 (Table 4)
+  num_layers: 8                      # Number of GATv2 message passing layers: 8 (Table 4)
+  dropout: 0.260                     # Dropout rate for regularization: 0.260 (Table 4)
+  pooling_strategy: "attention"      # Attention-based graph-level pooling
+  loc_encoding_dim: 8                # Dimensionality of location encodings: 8 (Table 4)
+  loc_encoding_min_freq: 1000.0      # Minimum frequency for multi-scale location encoding
+  loc_encoding_max_freq: 5600.0      # Maximum frequency for multi-scale location encoding
+  loc_encoding_type: "multiscale_learnable"  # Learnable multi-scale Fourier location encoding
+  use_edge_attr: True                # Incorporate edge attributes (e.g. edge lengths/angles) in MP
