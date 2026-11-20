@@ -25,3 +25,9 @@ data/data_distri*.json
 data/berlin/
 all_places.sh
 !data/scaler.joblib
+
+# experiment outputs (generated locally; not part of the repository)
+experiments/subsets/
+experiments/runs/
+experiments/results/
+experiments/pe_study/

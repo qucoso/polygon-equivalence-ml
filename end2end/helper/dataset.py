@@ -23,11 +23,14 @@ class PairPolygonDataset(Dataset):
             positive_ratio: float = 0.5,
             model_mode: str = "graph",
             augmenter=None,
-            d_pos_enc: int = 16 
+            d_pos_enc: int = 16,
+            random_pool_size: Optional[int] = None,
+            pool_seed: int = 0,
+            pe_mode: str = "linear"
             ):
         self.parquet_path = parquet_path
         self.model_mode = model_mode
-        self.pos_encoder = CyclicRelativePosEncoding(d_pos_enc=d_pos_enc)
+        self.pos_encoder = CyclicRelativePosEncoding(d_pos_enc=d_pos_enc, mode=pe_mode)
 
         df = pd.read_csv(intersection_path)
         self.intersection_pairs = df.values.astype(str).tolist()
@@ -51,6 +54,19 @@ class PairPolygonDataset(Dataset):
 
         with open(hard_candidates_path, 'r') as f:
             self.hard_candidates = json.load(f)
+
+        self.random_pairs = None
+        if random_pool_size is not None:
+            rng = np.random.default_rng(pool_seed)
+            n_ids = len(self.polygon_ids)
+            first = rng.integers(0, n_ids, size=random_pool_size)
+            second = rng.integers(0, n_ids, size=random_pool_size)
+            clash = first == second
+            while clash.any():
+                second[clash] = rng.integers(0, n_ids, size=int(clash.sum()))
+                clash = first == second
+            self.random_pairs = [(self.polygon_ids[i], self.polygon_ids[j])
+                                 for i, j in zip(first.tolist(), second.tolist())]
 
     def __len__(self) -> int:
         return len(self.polygon_ids) * 10
@@ -114,7 +130,11 @@ class PairPolygonDataset(Dataset):
                 poly2 = self.augmenter(poly1, second_polygon=poly2)
 
             elif strategy == 'random_other':
-                other_id = np.random.choice([pid for pid in self.polygon_ids if pid != anchor_id])
+                if self.random_pairs is not None:
+                    anchor_id, other_id = random.choice(self.random_pairs)
+                    poly1 = self._load_polygon(anchor_id)
+                else:
+                    other_id = np.random.choice([pid for pid in self.polygon_ids if pid != anchor_id])
                 poly2 = self._load_polygon(other_id)
 
             elif strategy == 'cluster':
@@ -212,7 +232,10 @@ def get_dataloader(config, model_mode="graph"):
         positive_ratio=config["dataset"].get("positive_ratio", 0.5),
         model_mode=model_mode,
         augmenter=augmenter,
-        d_pos_enc=config[model_key].get("d_pos_enc", 16)
+        d_pos_enc=config[model_key].get("d_pos_enc", 16),
+        random_pool_size=config["dataset"].get("random_pool_size"),
+        pool_seed=config.get("seed", 0),
+        pe_mode=config[model_key].get("pe_mode", "linear")
     )
 
     collate_fn = collate_graph_pairs if model_mode == "graph" else collate_pair_sequence
@@ -243,10 +266,11 @@ def get_dataloader(config, model_mode="graph"):
 
 #=======================
 class EvaluationPolygonDataset(Dataset):
-    def __init__(self, parquet_path: str, model_mode: str = "graph", d_pos_enc: int = 16):
+    def __init__(self, parquet_path: str, model_mode: str = "graph", d_pos_enc: int = 16,
+                 pe_mode: str = "linear"):
         self.table = pq.read_table(parquet_path)
         self.model_mode = model_mode
-        self.pos_encoder = CyclicRelativePosEncoding(d_pos_enc=d_pos_enc)
+        self.pos_encoder = CyclicRelativePosEncoding(d_pos_enc=d_pos_enc, mode=pe_mode)
 
     def __len__(self) -> int:
         return len(self.table)
@@ -304,7 +328,8 @@ def get_evaluation_dataloader(config, model_mode="graph"):
     dataset = EvaluationPolygonDataset(
         parquet_path=config["dataset"]["parquet_path"], 
         model_mode=model_mode,
-        d_pos_enc=config[model_key].get("d_pos_enc", 16)
+        d_pos_enc=config[model_key].get("d_pos_enc", 16),
+        pe_mode=config[model_key].get("pe_mode", "linear")
         )
     eval_collate_fn = eval_collate_fn_graph if model_mode == "graph" else eval_collate_fn_seq
 

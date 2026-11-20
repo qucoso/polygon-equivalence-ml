@@ -248,6 +248,67 @@ uv run python end2end/checkpoints/evaluate.py --compute-thresholds --plot-invari
 
 ---
 
+### Figures 11–13 — Negative-Sample Task Ablation (MLP & Perceiver)
+
+**What:** Models trained on positives plus a single negative-sample type (or the reference mix), evaluated across tasks and shifted negative-pair distributions. Figure 11 = cross-task F1 matrix, Figure 12 = permutation feature importance (MLP), Figure 13 = F1 on the hard/easy/uniform test distributions. Runs: 5 tasks + `ref` × 3 seeds for both the MLP and the Perceiver; the published checkpoints are added as `pretrained_full` ("published (full data)") and `ref` serves as "published (reduced data)" in Figure 13.
+
+**How:**
+
+```bash
+# 0. Build the balanced subsets once (writes experiments/subsets/)
+uv run python -m experiments.build_subsets
+
+# 1. Train all runs: 6 datasets x 3 seeds per architecture
+uv run python -m experiments.train_mlp --dataset intersection --seed 0   # repeat for each task in
+                                                                            # intersection, cluster, modified,
+                                                                            # random, same_center_dif_shape, ref
+                                                                            # and seeds 0, 1, 2
+uv run python -m experiments.train_e2e --dataset intersection --seed 0   # same for the Perceiver
+
+# 2. Evaluate all runs on all evaluation sets
+uv run python -m experiments.eval_mlp --pretrained featurebased/checkpoints/mlp_model.pt
+uv run python -m experiments.eval_e2e --pretrained end2end/checkpoints/perceiver_model.pt
+
+# 3. Permutation feature importance (Figure 12)
+uv run python -m experiments.pfi_mlp --pretrained featurebased/checkpoints/mlp_model.pt
+
+# 4. Manuscript figures (Figure 11: e1_f1_paper.pdf, Figure 12: pfi_mlp_paper.pdf,
+#    Figure 13: e3_f1_paper.pdf)
+uv run python -m experiments.plot_results --paper --metrics f1
+```
+
+**Output:**
+- `experiments/results/mlp_metrics.csv`, `experiments/results/e2e_metrics.csv`, `experiments/results/mlp_pfi.csv`
+- `experiments/results/plots/e1_f1_paper.pdf` (Figure 11), `pfi_mlp_paper.pdf` (Figure 12), `e3_f1_paper.pdf` (Figure 13)
+
+**Required data files** (in `PE_DATA_DIR`, default `/data/data_files`):
+- `berlin_X_pairs_dataset.npy`, `berlin_y_pairs_dataset.npy`, `berlin_idx_parameter_final.joblib`, `berlin_shuffle_idx.npy` (subsets + MLP)
+- `berlin_polygons.parquet`, `berlin_hard_negative_candidates.json`, `berlin_intersections_pairs.csv`, `berlin_idx_parameter.joblib`, `all_geoms_berlin.joblib` (Perceiver)
+
+---
+
+### Table 6 — Positional-Encoding Ablation (Perceiver)
+
+**What:** F1 of the Perceiver with different positional-encoding fusion strategies, trained with identical data and hyperparameters (3 seeds each); the published checkpoint is evaluated as a control. Variants: `concat_linear` (proposed), `add_linear64`, `none`.
+
+**How:**
+
+```bash
+# 1. Train the three variants on the reference data (x seeds 0, 1, 2)
+uv run python -m experiments.train_e2e --dataset ref --seed 0 --variant concat_linear
+uv run python -m experiments.train_e2e --dataset ref --seed 0 --variant add_linear64
+uv run python -m experiments.train_e2e --dataset ref --seed 0 --variant none
+
+# 2. Evaluate on all Berlin pairs with the optimal cosine-similarity threshold
+uv run python -m experiments.eval_pe_study
+```
+
+**Output:** `experiments/results/pe_study_metrics.csv` and `experiments/results/pe_study_summary.csv` (F1 mean ± std and ΔF1 per variant, as in Table 6)
+
+**Required data files:** `berlin_idx_parameter.joblib`, `all_geoms_berlin.joblib`, `berlin_polygons.parquet`, `berlin_hard_negative_candidates.json`, `berlin_intersections_pairs.csv`
+
+---
+
 ## 6. Full Retraining from Scratch (HPC Required)
 
 > **⚠ Computational cost:** Full retraining requires GPU access and significant compute time. We strongly recommend using an HPC cluster. The end-to-end models were trained on NVIDIA A100 GPUs.

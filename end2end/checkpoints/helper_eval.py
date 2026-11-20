@@ -285,7 +285,7 @@ def get_pos_encoder_for_model(spec) -> CyclicRelativePosEncoding:
         encoder_config = config.get("perceiver_encoder", config)
 
     d_pos_enc = encoder_config.get("d_pos_enc", 16)
-    return CyclicRelativePosEncoding(d_pos_enc=d_pos_enc)
+    return CyclicRelativePosEncoding(d_pos_enc=d_pos_enc, mode=encoder_config.get("pe_mode", "linear"))
 
 
 def prepare_batch_graph(

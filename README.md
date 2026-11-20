@@ -44,6 +44,10 @@ The following table maps every figure and table in the paper to the correspondin
 | Figure 8 | MLP Invariance Variances | `featurebased/checkpoints/evaluate_mlp.py` | Same as Figure 7 |
 | Figure 9 | Feature Importance (MLP & RF) | `featurebased/checkpoints/feature_importance.py` | `python featurebased/checkpoints/feature_importance.py --city <name> --skip-rf` |
 | Figure 10 | End-to-End Invariance (Perceiver, GNNs) | `end2end/checkpoints/evaluate.py` | `python end2end/checkpoints/evaluate.py --plot-invariance --city <name>` |
+| Figure 11 | Cross-Task Generalisation (single negative-sample type) | `experiments/train_mlp.py`, `experiments/train_e2e.py`, `experiments/eval_mlp.py`, `experiments/eval_e2e.py`, `experiments/plot_results.py` | Retrain per task (see [REPRODUCE.md § Figures 11–13](REPRODUCE.md#figures-1113--negative-sample-task-ablation-mlp--perceiver)), then `python -m experiments.plot_results --paper --metrics f1` |
+| Figure 12 | Permutation Feature Importance by Training Task (MLP) | `experiments/pfi_mlp.py`, `experiments/plot_results.py` | `python -m experiments.pfi_mlp --pretrained featurebased/checkpoints/mlp_model.pt`, then `python -m experiments.plot_results --paper` |
+| Figure 13 | Robustness to Negative-Pair Distribution Shifts | `experiments/eval_mlp.py`, `experiments/eval_e2e.py`, `experiments/plot_results.py` | Same runs as Figure 11, then `python -m experiments.plot_results --paper --metrics f1` |
+| Table 6 | Positional-Encoding Ablation (Perceiver) | `experiments/train_e2e.py --variant …`, `experiments/eval_pe_study.py` | `python -m experiments.train_e2e --dataset ref --seed 0 --variant concat_linear` (variants: `concat_linear`, `add_linear64`, `none`), then `python -m experiments.eval_pe_study` |
 
 ---
 
@@ -98,6 +102,19 @@ The following table maps every figure and table in the paper to the correspondin
 │       ├── mpca_config.yaml / .pt         # MPCA checkpoint
 │       ├── evaluate.py                    # End-to-end evaluation pipeline (Figure 10)
 │       └── helper_eval.py                 # Evaluation utilities
+│
+└── experiments/                           # Ablation studies (Figures 11–13, Table 6)
+    ├── __init__.py
+    ├── common.py                          # Shared constants (tasks, eval sets) & path helpers
+    ├── build_subsets.py                   # Balanced train/val/test index subsets per negative-sample type
+    ├── train_mlp.py                       # Train MLP on one subset (Figure 11–13 runs)
+    ├── train_e2e.py                       # Train Perceiver on one subset / PE variant (Figure 11, 13, Table 6)
+    ├── eval_mlp.py                        # Evaluate MLP runs on all eval sets → mlp_metrics.csv
+    ├── eval_e2e.py                        # Evaluate Perceiver runs on all eval sets → e2e_metrics.csv
+    ├── pfi_mlp.py                         # Permutation feature importance → mlp_pfi.csv (Figure 12)
+    ├── eval_pe_study.py                   # PE-ablation evaluation → pe_study_summary.csv (Table 6)
+    └── plot_results.py                    # Manuscript figures: Figure 11 (e1_*_paper), Figure 12
+                                           #   (pfi_mlp_paper), Figure 13 (e3_*_paper) via --paper
 ```
 
 ---

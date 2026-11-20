@@ -196,7 +196,7 @@ def get_pos_encoder(spec: ModelSpec) -> CyclicRelativePosEncoding:
     """Create the CyclicRelativePosEncoding that matches a model's config."""
     key = "graph_encoder" if spec.model_type == "graph" else "perceiver_encoder"
     sub = spec.config.get(key, spec.config)
-    return CyclicRelativePosEncoding(d_pos_enc=sub.get("d_pos_enc", 16))
+    return CyclicRelativePosEncoding(d_pos_enc=sub.get("d_pos_enc", 16), mode=sub.get("pe_mode", "linear"))
 
 
 def ensure_polygon(geom) -> Polygon:

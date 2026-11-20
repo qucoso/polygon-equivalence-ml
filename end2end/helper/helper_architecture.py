@@ -91,12 +91,30 @@ class SinusoidalMultiScaleLocEncoder(nn.Module):
 # =============================================================================
 
 class CyclicRelativePosEncoding(nn.Module):
-    def __init__(self, d_pos_enc: int, max_freq: float = 10000.0):
+    """Positional encoding of the relative arc length s in [0, 1] along the polygon outline.
+
+    mode="linear" (default, published model): sin/cos(s * w_k) with w_k = max_freq**(-2k/d) <= 1.
+        Not periodic: the first (s = 0) and the closing vertex (s = 1) get different values.
+    mode="cyclic": sin/cos(2*pi * 2**k * s), k = 0 .. d/2 - 1. Integer harmonics of the perimeter,
+        so the encoding is periodic and continuous around the closed outline (s = 0 and s = 1 coincide).
+    """
+    MODES = ("linear", "cyclic")
+
+    def __init__(self, d_pos_enc: int, max_freq: float = 10000.0, mode: str = "linear"):
         super().__init__()
         if d_pos_enc % 2 != 0:
             raise ValueError(f"d_pos_enc must be even, got {d_pos_enc}")
+        if mode not in self.MODES:
+            raise ValueError(f"Unknown positional encoding mode '{mode}', choose from {self.MODES}")
         self.d_pos_enc = d_pos_enc
-        inv_freq = 1.0 / (max_freq ** (torch.arange(0, d_pos_enc, 2, dtype=torch.float32) / d_pos_enc))
+        self.mode = mode
+        if mode == "linear":
+            inv_freq = 1.0 / (max_freq ** (torch.arange(0, d_pos_enc, 2, dtype=torch.float32) / d_pos_enc))
+        else:
+            if d_pos_enc // 2 > 16:
+                raise ValueError("cyclic mode supports at most 16 frequencies (d_pos_enc <= 32); "
+                                 "higher powers of two exceed float32 precision")
+            inv_freq = 2 * np.pi * 2.0 ** torch.arange(d_pos_enc // 2, dtype=torch.float32)
         self.register_buffer('inv_freq', inv_freq)
 
     def _sinus_cosine_encoding(self, values: torch.Tensor) -> torch.Tensor:
@@ -116,6 +134,21 @@ class CyclicRelativePosEncoding(nn.Module):
         cumulative_dist = F.pad(torch.cumsum(segment_lengths, dim=1)[:, :-1], (1, 0), "constant", 0)
         rel_pos = cumulative_dist / perimeter
         return self._sinus_cosine_encoding(rel_pos)
+
+    def forward_padded(self, x_coords: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Batched equivalent of forward() for zero-padded sequences (mask is True at padding)."""
+        B, N, _ = x_coords.shape
+        valid = ~mask
+        lengths = valid.sum(dim=1, keepdim=True)
+        idx = torch.arange(N, device=x_coords.device).expand(B, N)
+        nxt = torch.where(idx + 1 < lengths, idx + 1, torch.zeros_like(idx))
+        nxt_coords = torch.gather(x_coords, 1, nxt.unsqueeze(-1).expand(-1, -1, 2))
+        segment_lengths = torch.norm(nxt_coords - x_coords, p=2, dim=-1) * valid
+        perimeter = segment_lengths.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        cumulative_dist = F.pad(torch.cumsum(segment_lengths, dim=1)[:, :-1], (1, 0), "constant", 0)
+        pe = self._sinus_cosine_encoding(cumulative_dist / perimeter)
+        keep = valid & (lengths > 1)
+        return pe * keep.unsqueeze(-1)
 
 # =============================================================================
 # 4. masked_random_roll

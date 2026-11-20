@@ -10,8 +10,17 @@ class PolygonPerceiver(nn.Module):
                  d_pos_enc=32, embedding_dim=128, dim_feedforward_factor=4,
                  num_pool_queries=1, latent_dropout=0.1, use_layernorm_inputs=True,
                  loc_encoding_type="simple", loc_encoding_dim=32,
-                 loc_encoding_min_freq=1000.0, loc_encoding_max_freq=5600.0):
+                 loc_encoding_min_freq=1000.0, loc_encoding_max_freq=5600.0,
+                 pos_fusion="concat", pe_mode="linear"):
         super().__init__()
+        # pe_mode only documents which positional encoding the inputs carry (computed outside the model)
+        self.pe_mode = pe_mode
+        if pos_fusion not in ("concat", "add_proj", "add_fixed", "none"):
+            raise ValueError(f"Unknown pos_fusion '{pos_fusion}'")
+        if pos_fusion == "add_fixed" and d_pos_enc > d_model:
+            raise ValueError("pos_fusion='add_fixed' requires d_pos_enc <= d_model")
+        self.d_model = d_model
+        self.pos_fusion = pos_fusion
 
         # --- Feature extractors ---
         # 1. Fourier features on absolute coordinates (for translation variance)
@@ -27,7 +36,11 @@ class PolygonPerceiver(nn.Module):
         self.pose_proj = nn.Linear(2, self.pose_feature_dim)
 
         # --- Feature Fusion ---
-        raw_feature_dim = (self.loc_encoder.output_dim + self.pose_feature_dim + d_pos_enc)
+        raw_feature_dim = self.loc_encoder.output_dim + self.pose_feature_dim
+        if pos_fusion == "concat":
+            raw_feature_dim += d_pos_enc
+        if pos_fusion == "add_proj":
+            self.pos_proj = nn.Linear(d_pos_enc, d_model)
 
         self.feature_fusion = nn.Sequential(
             nn.Linear(raw_feature_dim, d_model),
@@ -98,13 +111,15 @@ class PolygonPerceiver(nn.Module):
         pose_features = self.pose_proj(centroid_vectors)
 
         # --- 2. Feature Fusion ---
-        features = torch.cat([
-            fourier_features,
-            pose_features,
-            cyclic_pe,
-        ], dim=-1)
-        
-        features = self.feature_fusion(features)
+        parts = [fourier_features, pose_features]
+        if self.pos_fusion == "concat":
+            parts.append(cyclic_pe)
+        features = self.feature_fusion(torch.cat(parts, dim=-1))
+        if self.pos_fusion == "add_proj":
+            features = features + self.pos_proj(cyclic_pe)
+        elif self.pos_fusion == "add_fixed":
+            # parameter-free addition of the unchanged PE, zero-padded to d_model
+            features = features + F.pad(cyclic_pe, (0, self.d_model - cyclic_pe.size(-1)))
         features = self.input_norm(features)
 
         # --- 3. Perceiver processing ---
